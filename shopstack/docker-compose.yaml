@@ -1,0 +1,149 @@
+version: '3.8'
+
+services:
+  # Application Services
+  api_gateway:
+    build:
+      context: .
+      dockerfile: ./apps/api_gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - CATALOG_SERVICE_URL=http://catalog:8001
+      - CART_SERVICE_URL=http://cart:8002
+      - OTLP_ENDPOINT=http://otel-collector:4317
+    depends_on:
+      catalog:
+        condition: service_healthy
+      cart:
+        condition: service_healthy
+    networks:
+      - shopstack-network
+    restart: unless-stopped
+
+  catalog:
+    build:
+      context: .
+      dockerfile: ./apps/catalog/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - OTLP_ENDPOINT=http://otel-collector:4317
+    networks:
+      - shopstack-network
+    restart: unless-stopped
+
+  cart:
+    build:
+      context: .
+      dockerfile: ./apps/cart/Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      - OTLP_ENDPOINT=http://otel-collector:4317
+    networks:
+      - shopstack-network
+    restart: unless-stopped
+
+  # Observability Stack
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - shopstack-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    networks:
+      - shopstack-network
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:2.9.0
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./ops/loki/local-config.yaml:/etc/loki/local-config.yaml
+      - ./ops/loki/entrypoint.sh:/entrypoint.sh
+      - loki_data:/tmp/loki
+    user: "0:0"
+    entrypoint: ["/entrypoint.sh"]
+    networks:
+      - shopstack-network
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:2.9.0
+    volumes:
+      - ./ops/promtail/config.yml:/etc/promtail/config.yml
+      - /var/log:/var/log
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks:
+      - shopstack-network
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.3.0
+    ports:
+      - "3200:3200"
+      - "4317:4317"
+    command: [ "--config.file", "/etc/tempo.yaml" ]
+    volumes:
+      - ./ops/tempo/tempo.yaml:/etc/tempo.yaml
+      - tempo_data:/tmp/tempo
+    networks:
+      - shopstack-network
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector:0.88.0
+    ports:
+      - "4318:4318"
+      - "4319:4317"
+    volumes:
+      - ./ops/otel-collector/config.yaml:/etc/otelcol/config.yaml
+    command: [ "--config", "/etc/otelcol/config.yaml" ]
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    networks:
+      - shopstack-network
+    restart: unless-stopped
+
+networks:
+  shopstack-network:
+    driver: bridge
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  tempo_data:
